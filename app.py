@@ -2,71 +2,87 @@ import streamlit as st
 import google.generativeai as genai
 import PyPDF2
 from io import BytesIO
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.responses import JSONResponse
+from starlette.middleware.wsgi import WSGIMiddleware
+import uvicorn
 
 # Configure Gemini API
 genai.configure(api_key="AIzaSyAOw3Y-QYSQ1uq8XzcEdxdUS9tOHWcSRZw")
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Function to process API requests
-def process_request(name, cgpa, resume_file, goals):
-    # Process the uploaded resume (PDF format)
-    resume_content = ""
+# Helper function to process uploaded PDF and extract text
+def process_resume(file):
     try:
-        pdf_reader = PyPDF2.PdfReader(BytesIO(resume_file))
+        resume_content = ""
+        pdf_reader = PyPDF2.PdfReader(file)
         for page in pdf_reader.pages:
             resume_content += page.extract_text()
+        return resume_content
     except Exception as e:
-        return {"error": "Failed to process the uploaded PDF: " + str(e)}, 500
+        raise ValueError(f"Error processing PDF: {e}")
 
-    # Prepare input for the Gemini API
-    input_data = (
-        f"Name: {name}\n"
-        f"CGPA: {cgpa}\n"
-        f"Resume: {resume_content}\n"
-        f"Goals: {goals}\n"
-        "Provide personalized career guidance based on this information."
-    )
+# Streamlit visual testing interface
+st.title("Career Guidance API")
 
-    # Call the Gemini API
+if st.checkbox("Test the API Locally"):
+    name = st.text_input("Name")
+    cgpa = st.text_input("CGPA")
+    goals = st.text_area("Career Goals")
+    uploaded_file = st.file_uploader("Upload Resume (PDF)", type=["pdf"])
+
+    if st.button("Generate Guidance"):
+        try:
+            if not name or not cgpa or not uploaded_file or not goals:
+                st.error("All fields are required!")
+            else:
+                resume_text = process_resume(uploaded_file)
+                input_data = (
+                    f"Name: {name}\n"
+                    f"CGPA: {cgpa}\n"
+                    f"Resume: {resume_text}\n"
+                    f"Goals: {goals}\n"
+                    "Provide personalized career guidance based on this information."
+                )
+                response = model.generate_content(input_data)
+                st.success("Generated Output:")
+                st.text_area("Output", response.text, height=300)
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+# FastAPI backend for integration with React
+app = FastAPI()
+
+@app.post("/generate")
+async def generate_api(
+    name: str = Form(...),
+    cgpa: str = Form(...),
+    goals: str = Form(...),
+    resume: UploadFile = File(...),
+):
     try:
+        if not resume.filename.endswith(".pdf"):
+            return JSONResponse(
+                status_code=400, content={"error": "Resume must be a PDF file"}
+            )
+
+        resume_text = process_resume(BytesIO(await resume.read()))
+        input_data = (
+            f"Name: {name}\n"
+            f"CGPA: {cgpa}\n"
+            f"Resume: {resume_text}\n"
+            f"Goals: {goals}\n"
+            "Provide personalized career guidance based on this information."
+        )
         response = model.generate_content(input_data)
-        generated_text = response.text
-        return {"output": generated_text}, 200
+        return {"output": response.text}
     except Exception as e:
-        return {"error": "Failed to process data with the Gemini API: " + str(e)}, 500
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
-# Streamlit app configuration
-st.set_page_config(page_title="Streamlit API Endpoint", layout="wide")
-st.title("Streamlit API Endpoint")
+# Mount FastAPI within Streamlit
+st.write("API is ready to accept POST requests at `/generate`.")
+st.write("Use the following endpoint in your React app:")
+st.code("http://<your-streamlit-domain>/generate", language="bash")
 
-# Input Fields
-st.header("Provide Your Details")
-name = st.text_input("Name", help="Enter your full name")
-cgpa = st.text_input("CGPA", help="Enter your CGPA (e.g., 3.8)")
-resume_file = st.file_uploader("Upload Resume (PDF)", type="pdf", help="Upload your resume in PDF format")
-goals = st.text_area("Career Goals", help="Describe your career aspirations and goals")
-
-# Button to trigger API call
-if st.button("Generate Guidance"):
-    if not name or not cgpa or not resume_file or not goals:
-        st.error("Please fill out all required fields (Name, CGPA, Resume, and Goals).")
-    else:
-        file_content = resume_file.read() if resume_file else None
-        result, status_code = process_request(name, cgpa, file_content, goals)
-
-        if status_code == 200:
-            st.success("Output Generated Successfully")
-            st.text_area("Generated Output", result["output"], height=300)
-        else:
-            st.error(result["error"])
-
-# API Endpoint Information
-st.sidebar.header("API Usage Instructions")
-st.sidebar.write("This app acts as an API endpoint.")
-st.sidebar.write("1. Deploy this app using Streamlit Cloud or a similar service.")
-st.sidebar.write("2. Use the app's URL in your React frontend to send inputs and receive outputs.")
-st.sidebar.write("3. Ensure all inputs (Name, CGPA, Resume, Goals) are provided correctly.")
-
-# Footer
-st.sidebar.markdown("---")
-st.sidebar.write("Developed with ❤️ using Streamlit and OpenAI's Generative AI.")
+# Run FastAPI server inside Streamlit
+st.experimental_singleton(lambda: uvicorn.run(app, host="0.0.0.0", port=8501))
